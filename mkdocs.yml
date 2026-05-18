@@ -1,0 +1,64 @@
+# mkdocs.yml
+site_name: AuthForge
+site_description: Framework-agnostic authentication library for Python
+site_author: sileyekounou-1
+site_url: https://authforge.dev
+
+repo_name: sileyekounou-1/authforge
+repo_url: https://github.com/sileyekounou-1/authforge
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  language: en
+  palette:
+    - scheme: default
+      primary: deep orange
+      accent: orange
+      toggle:
+        icon: material/brightness-7
+        name: Dark mode
+    - scheme: slate
+      primary: deep orange
+      accent: orange
+      toggle:
+        icon: material/brightness-4
+        name: Light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+plugins:
+  - search
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.inlinehilite
+  - admonition
+  - pymdownx.details
+  - attr_list
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Configuration: configuration.md
+  - Guides:
+      - OAuth: guides/oauth.md
+      - Two-Factor Auth: guides/two-factor.md
+  - API Reference: api-reference.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/sileyekounou-1/authforge
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/authforge
