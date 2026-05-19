@@ -71,7 +71,10 @@ class FastAPIAdapter:
                 if self.rate_limiter:
                     await self.rate_limiter.record_failure(request, "register")
                 raise HTTPException(status_code=400, detail="Email déjà utilisé")
-            self.password.validate_strength(body.password)
+            try:
+                self.password.validate_strength(body.password)
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e))
             hashed = self.password.hash(body.password)
             user = await self.db.create_user(email=body.email, hashed_password=hashed)
             self.session.set_tokens(response, user.id)
@@ -195,7 +198,10 @@ class FastAPIAdapter:
                 request: Request, user: User = Depends(self.current_user())
             ):
                 assert self.two_factor_plugin is not None
-                result = await self.two_factor_plugin.enable_2fa(user.id)
+                try:
+                    result = await self.two_factor_plugin.enable_2fa(user.id)
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
                 return result
 
             @self.router.post("/2fa/confirm")
@@ -203,9 +209,14 @@ class FastAPIAdapter:
                 body: dict, user: User = Depends(self.current_user())
             ):
                 assert self.two_factor_plugin is not None
-                confirmed = await self.two_factor_plugin.confirm_2fa(
-                    user.id, body["code"]
-                )
+                if "code" not in body:
+                    raise HTTPException(status_code=400, detail="Code requis")
+                try:
+                    confirmed = await self.two_factor_plugin.confirm_2fa(
+                        user.id, body["code"]
+                    )
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
                 if not confirmed:
                     raise HTTPException(status_code=400, detail="Code invalide")
                 return {"message": "2FA activé"}
@@ -219,7 +230,10 @@ class FastAPIAdapter:
                     raise HTTPException(
                         status_code=400, detail="user_id et code requis"
                     )
-                valid = await self.two_factor_plugin.validate_2fa(user_id, code)
+                try:
+                    valid = await self.two_factor_plugin.validate_2fa(user_id, code)
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
                 if not valid:
                     raise HTTPException(status_code=401, detail="Code 2FA invalide")
                 return {"message": "2FA validé"}
@@ -229,9 +243,14 @@ class FastAPIAdapter:
                 body: dict, user: User = Depends(self.current_user())
             ):
                 assert self.two_factor_plugin is not None
-                disabled = await self.two_factor_plugin.disable_2fa(
-                    user.id, body["code"]
-                )
+                if "code" not in body:
+                    raise HTTPException(status_code=400, detail="Code requis")
+                try:
+                    disabled = await self.two_factor_plugin.disable_2fa(
+                        user.id, body["code"]
+                    )
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
                 if not disabled:
                     raise HTTPException(status_code=400, detail="Code invalide")
                 return {"message": "2FA désactivé"}
