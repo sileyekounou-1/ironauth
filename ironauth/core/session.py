@@ -1,18 +1,24 @@
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import jwt
 from fastapi import Request, Response
+
 from ironauth.core.config import ironauthConfig
+from ironauth.core.token_blacklist import TokenBlacklist
 
 
 class SessionManager:
-    def __init__(self, config: ironauthConfig):
+    def __init__(
+        self, config: ironauthConfig, blacklist: TokenBlacklist | None = None
+    ):
         self.config = config
         self.secret = config.secret_key.get_secret_value()
         self.algorithm = config.token.algorithm
         self.cookie = config.cookie
         self.token = config.token
+        self.blacklist = blacklist or TokenBlacklist()
 
     # --- JWT ---
 
@@ -46,6 +52,26 @@ class SessionManager:
             raise ValueError("Token expiré")
         except jwt.InvalidTokenError:
             raise ValueError("Token invalide")
+
+    async def decode_token_safe(self, token: str, token_type: str) -> Optional[str]:
+        """Vérifie le token ET la blacklist."""
+        if await self.blacklist.is_blacklisted(token):
+            raise ValueError("Token révoqué")
+        return self.decode_token(token, token_type)
+
+    async def revoke_token(self, token: str) -> None:
+        """Ajoute un token à la blacklist jusqu'à son expiration."""
+        try:
+            payload = jwt.decode(
+                token,
+                self.secret,
+                algorithms=[self.algorithm],
+                options={"verify_exp": False},  # on révoque même les tokens expirés
+            )
+            expires_at = float(payload.get("exp", time.time()))
+            await self.blacklist.add(token, expires_at)
+        except jwt.InvalidTokenError:
+            pass  # Token déjà invalide, rien à faire
 
     # --- Cookies ---
 
@@ -89,10 +115,17 @@ class SessionManager:
         if not refresh_token:
             return None
 
+        # Vérifie blacklist avant de décoder
+        if await self.blacklist.is_blacklisted(refresh_token):
+            return None
+
         user_id = self.decode_token(refresh_token, "refresh")
         if not user_id:
             return None
 
-        # Rotation : on génère une nouvelle paire de tokens
+        # Révoque l'ancien refresh token — rotation réelle
+        await self.revoke_token(refresh_token)
+
+        # Émet une nouvelle paire
         self.set_tokens(response, user_id)
         return user_id

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from ironauth.adapters.database.sqlalchemy import SQLAlchemyAdapter
 from ironauth.core.auth import ironauth
+from tests.conftest import get_csrf_headers
 
 DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -25,74 +26,105 @@ def client():
 
 
 def test_register(client):
+    headers = get_csrf_headers(client)
     res = client.post(
         "/auth/register",
         json={"email": "tug@test.com", "password": "MonMotDePasse123!"},
+        headers=headers,
     )
     assert res.status_code == 200
     assert "user_id" in res.json()
 
 
 def test_register_email_deja_utilise(client):
+    headers = get_csrf_headers(client)
     client.post(
         "/auth/register",
         json={"email": "double@test.com", "password": "MonMotDePasse123!"},
+        headers=headers,
     )
+    headers = get_csrf_headers(client)
     res = client.post(
         "/auth/register",
         json={"email": "double@test.com", "password": "MonMotDePasse123!"},
+        headers=headers,
     )
     assert res.status_code == 400
 
 
 def test_login(client):
+    headers = get_csrf_headers(client)
     client.post(
         "/auth/register",
         json={"email": "login@test.com", "password": "MonMotDePasse123!"},
+        headers=headers,
     )
+    headers = get_csrf_headers(client)
     res = client.post(
-        "/auth/login", json={"email": "login@test.com", "password": "MonMotDePasse123!"}
+        "/auth/login",
+        json={"email": "login@test.com", "password": "MonMotDePasse123!"},
+        headers=headers,
     )
     assert res.status_code == 200
     assert "af_access_token" in res.cookies
 
 
 def test_login_mauvais_mdp(client):
+    headers = get_csrf_headers(client)
     client.post(
         "/auth/register",
         json={"email": "wrong@test.com", "password": "MonMotDePasse123!"},
+        headers=headers,
     )
+    headers = get_csrf_headers(client)
     res = client.post(
         "/auth/login",
         json={"email": "wrong@test.com", "password": "MauvaisMotDePasse123!"},
+        headers=headers,
     )
     assert res.status_code == 401
 
 
 def test_logout(client):
+    headers = get_csrf_headers(client)
     client.post(
         "/auth/register",
         json={"email": "logout@test.com", "password": "MonMotDePasse123!"},
+        headers=headers,
     )
+    headers = get_csrf_headers(client)
     client.post(
         "/auth/login",
         json={"email": "logout@test.com", "password": "MonMotDePasse123!"},
+        headers=headers,
     )
-    res = client.post("/auth/logout")
+    headers = get_csrf_headers(client)
+    res = client.post("/auth/logout", headers=headers)
     assert res.status_code == 200
     assert "af_access_token" not in res.cookies
 
 
 def test_refresh(client):
+    headers = get_csrf_headers(client)
     client.post(
         "/auth/register",
         json={"email": "refresh@test.com", "password": "MonMotDePasse123!"},
+        headers=headers,
     )
+    headers = get_csrf_headers(client)
     login_res = client.post(
         "/auth/login",
         json={"email": "refresh@test.com", "password": "MonMotDePasse123!"},
+        headers=headers,
     )
-    # Extraire le refresh token du cookie et le passer explicitement
     refresh_token = login_res.cookies.get("af_refresh_token")
     res = client.post("/auth/refresh", cookies={"af_refresh_token": refresh_token})
     assert res.status_code == 200
+
+
+def test_csrf_bloque_sans_token(client):
+    res = client.post(
+        "/auth/login",
+        json={"email": "test@test.com", "password": "MonMotDePasse123!"},
+    )
+    assert res.status_code == 403

@@ -1,6 +1,6 @@
 [project]
 name = "ironauth"
-version = "0.1.0"
+version = "0.2.0"
 description = "Framework-agnostic authentication library for Python"
 readme = "README.md"
 license = { text = "MIT" }
@@ -27,7 +27,11 @@ dependencies = [
     "pyotp>=2.9.0",
     "qrcode[pil]>=8.2",
     "sqlalchemy>=2.0.49",
+    "aiosmtplib>=3.0",
 ]
+
+[project.optional-dependencies]
+redis = ["redis>=5.0"]
 
 [dependency-groups]
 dev = [

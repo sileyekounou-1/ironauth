@@ -29,6 +29,9 @@ class User(Base):
     )
     totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
     totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    email_verification_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    password_reset_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    password_reset_expires_at: Mapped[float | None] = mapped_column(nullable=True)
 
 
 class OAuthAccount(Base):

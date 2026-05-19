@@ -49,3 +49,12 @@ async def client(auth):
     app = FastAPI()
     app.include_router(auth.router)
     return TestClient(app)
+
+
+def get_csrf_headers(client: TestClient) -> dict:
+    """Récupère un token CSRF valide et retourne les headers + cookies nécessaires."""
+    res = client.get("/auth/csrf-token")
+    csrf_token = res.json()["csrf_token"]
+    raw_token = res.cookies.get("af_csrf_token")
+    client.cookies.set("af_csrf_token", raw_token)
+    return {"X-CSRF-Token": csrf_token}

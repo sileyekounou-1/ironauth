@@ -1,11 +1,11 @@
 # mkdocs.yml
-site_name: AuthForge
+site_name: IronAuth
 site_description: Framework-agnostic authentication library for Python
 site_author: sileyekounou-1
-site_url: https://authforge.dev
+site_url: https://ironauth.dev
 
-repo_name: sileyekounou-1/authforge
-repo_url: https://github.com/sileyekounou-1/authforge
+repo_name: sileyekounou-1/ironauth
+repo_url: https://github.com/sileyekounou-1/ironauth
 edit_uri: edit/main/docs/
 
 theme:
@@ -59,6 +59,6 @@ nav:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/sileyekounou-1/authforge
+      link: https://github.com/sileyekounou-1/ironauth
     - icon: fontawesome/brands/python
-      link: https://pypi.org/project/authforge
+      link: https://pypi.org/project/ironauth

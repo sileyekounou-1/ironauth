@@ -28,8 +28,16 @@ class OAuthConfig(BaseModel):
     github: Optional[OAuthProviderConfig] = None
 
 
+class EmailConfig(BaseModel):
+    base_url: str = "http://localhost:8000"
+    app_name: str = "IronAuth"
+    from_email: str = "noreply@ironauth.dev"
+    from_name: str = "IronAuth"
+
+
 class ironauthConfig(BaseModel):
     secret_key: SecretStr
     cookie: CookieConfig = Field(default_factory=CookieConfig)
     token: TokenConfig = Field(default_factory=TokenConfig)
     oauth: Optional[OAuthConfig] = None
+    email: Optional[EmailConfig] = None

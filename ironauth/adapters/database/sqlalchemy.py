@@ -86,6 +86,20 @@ class SQLAlchemyAdapter:
             )
             return result.scalar_one_or_none()
 
+    async def get_user_by_verification_token(self, token: str) -> Optional[User]:
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(User).where(User.email_verification_token == token)
+            )
+            return result.scalar_one_or_none()
+
+    async def get_user_by_reset_token(self, token: str) -> Optional[User]:
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(User).where(User.password_reset_token == token)
+            )
+            return result.scalar_one_or_none()
+
 
 def sqlalchemy_adapter(database_url: str) -> SQLAlchemyAdapter:
     return SQLAlchemyAdapter(database_url)
