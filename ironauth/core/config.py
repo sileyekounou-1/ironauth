@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, SecretStr
 
@@ -14,7 +14,8 @@ class CookieConfig(BaseModel):
 class TokenConfig(BaseModel):
     access_token_expiry: int = 900  # 15 min
     refresh_token_expiry: int = 604800  # 7 jours
-    algorithm: str = "HS256"
+    # Seuls les algorithmes HMAC symétrique sont autorisés — "none" est rejeté
+    algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
 
 
 class OAuthProviderConfig(BaseModel):
