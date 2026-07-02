@@ -125,7 +125,8 @@ class EmailManager:
             hashed_password=hashed,
             password_reset_token=None,
             password_reset_expires_at=None,
-            # Invalide toutes les sessions émises avant le reset
-            sessions_valid_from=time.time(),
+            # Invalide toutes les sessions émises avant le reset.
+            # Entier (comme l'iat JWT) pour éviter tout faux verrouillage sous-seconde.
+            sessions_valid_from=int(time.time()),
         )
         return True

@@ -1,4 +1,5 @@
 import secrets
+import time
 from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -37,6 +38,11 @@ class ResetPasswordRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class VerifyEmailRequest(BaseModel):
     token: str
 
@@ -48,6 +54,17 @@ class TwoFactorValidateRequest(BaseModel):
 
 class TwoFactorCodeRequest(BaseModel):
     code: str
+
+
+def _serialize_user(user: User) -> dict:
+    return {
+        "id": user.id,
+        "email": user.email,
+        "is_active": user.is_active,
+        "is_verified": user.is_verified,
+        "totp_enabled": user.totp_enabled,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+    }
 
 
 class FastAPIAdapter:
@@ -104,6 +121,14 @@ class FastAPIAdapter:
             except IntegrityError:
                 # Race : un autre register concurrent a inséré le même email
                 raise HTTPException(status_code=400, detail="Email deja utilise")
+            # Si la vérification est requise, on ne connecte pas : on envoie l'email
+            if self.config.require_verified_email:
+                if self.email_manager:
+                    await self.email_manager.send_verification_email(user.id)
+                return {
+                    "message": "Compte cree, verifie ton email pour te connecter",
+                    "user_id": user.id,
+                }
             self.session.set_tokens(response, user.id)
             return {"message": "Compte cree", "user_id": user.id}
 
@@ -125,6 +150,13 @@ class FastAPIAdapter:
                 raise HTTPException(status_code=401, detail="Compte desactive")
             if self.rate_limiter:
                 await self.rate_limiter.record_success(request, "login")
+
+            # Email non vérifié : connexion refusée si l'app l'exige
+            if self.config.require_verified_email and not user.is_verified:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Email non verifie. Verifie ton email avant de te connecter.",
+                )
 
             # Rehash transparent si les paramètres Argon2 ont évolué
             if self.password.needs_rehash(user.hashed_password):
@@ -148,6 +180,10 @@ class FastAPIAdapter:
         @self.router.post("/logout")
         async def logout(request: Request, response: Response):
             await self.csrf.validate_request(request)
+            # Révoque access ET refresh pour couper la session immédiatement
+            access_token = self.session.get_access_token(request)
+            if access_token:
+                await self.session.revoke_token(access_token)
             refresh_token = self.session.get_refresh_token(request)
             if refresh_token:
                 await self.session.revoke_token(refresh_token)
@@ -170,6 +206,37 @@ class FastAPIAdapter:
             if not user_id:
                 raise HTTPException(status_code=401, detail="Session expiree")
             return {"message": "Session renouvelee"}
+
+        @self.router.get("/me")
+        async def me(user: User = Depends(self.current_user())):
+            return _serialize_user(user)
+
+        @self.router.post("/change-password")
+        async def change_password(
+            body: ChangePasswordRequest,
+            request: Request,
+            response: Response,
+            user: User = Depends(self.current_user()),
+        ):
+            await self.csrf.validate_request(request)
+            if not user.hashed_password or not self.password.verify(
+                body.current_password, user.hashed_password
+            ):
+                raise HTTPException(status_code=400, detail="Mot de passe actuel incorrect")
+            try:
+                self.password.validate_strength(body.new_password)
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e))
+            hashed = self.password.hash(body.new_password)
+            # Invalide toutes les autres sessions ; on ré-émet une session fraîche
+            # pour l'appareil courant.
+            await self.db.update_user(
+                user.id,
+                hashed_password=hashed,
+                sessions_valid_from=int(time.time()),
+            )
+            self.session.set_tokens(response, user.id)
+            return {"message": "Mot de passe modifie"}
 
         if self.oauth_plugin:
 
@@ -206,8 +273,13 @@ class FastAPIAdapter:
         if self.email_manager:
 
             @self.router.post("/send-verification-email")
-            async def send_verification(user: User = Depends(self.current_user())):
+            async def send_verification(
+                request: Request, user: User = Depends(self.current_user())
+            ):
                 assert self.email_manager is not None
+                if self.rate_limiter:
+                    await self.rate_limiter.check(request, "send_verification")
+                    await self.rate_limiter.record_failure(request, "send_verification")
                 try:
                     await self.email_manager.send_verification_email(user.id)
                     return {"message": "Email de verification envoye"}
@@ -228,6 +300,9 @@ class FastAPIAdapter:
             async def forgot_password(request: Request, body: ForgotPasswordRequest):
                 await self.csrf.validate_request(request)
                 assert self.email_manager is not None
+                if self.rate_limiter:
+                    await self.rate_limiter.check(request, "forgot_password")
+                    await self.rate_limiter.record_failure(request, "forgot_password")
                 await self.email_manager.send_reset_password_email(body.email)
                 return {"message": "Si cet email existe, un lien a ete envoye"}
 
@@ -280,9 +355,11 @@ class FastAPIAdapter:
                 if self.rate_limiter:
                     await self.rate_limiter.check(request, "2fa_validate")
                 try:
-                    user_id = self.session.decode_token(body.two_factor_token, "2fa")
+                    # decode_token_safe vérifie aussi la blacklist → token à usage unique
+                    payload = await self.session.decode_token_safe(body.two_factor_token, "2fa")
                 except ValueError:
                     raise HTTPException(status_code=401, detail="Token 2FA expire ou invalide")
+                user_id = payload.get("sub") if payload else None
                 if not user_id:
                     raise HTTPException(status_code=401, detail="Token 2FA invalide")
                 try:
@@ -295,7 +372,8 @@ class FastAPIAdapter:
                     raise HTTPException(status_code=401, detail="Code 2FA invalide")
                 if self.rate_limiter:
                     await self.rate_limiter.record_success(request, "2fa_validate")
-                # Code correct → on émet enfin la vraie session
+                # Consomme le token 2FA (usage unique) puis émet la vraie session
+                await self.session.revoke_token(body.two_factor_token)
                 self.session.set_tokens(response, user_id)
                 return {"message": "Connecte"}
 

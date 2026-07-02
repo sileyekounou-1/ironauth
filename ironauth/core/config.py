@@ -44,6 +44,8 @@ class ironauthConfig(BaseModel):
     email: Optional[EmailConfig] = None
     # Derrière un reverse proxy fiable : lire l'IP client depuis X-Forwarded-For
     trust_proxy: bool = False
+    # Si True, un compte non vérifié ne peut pas se connecter (nécessite le plugin email)
+    require_verified_email: bool = False
 
     @field_validator("secret_key")
     @classmethod
