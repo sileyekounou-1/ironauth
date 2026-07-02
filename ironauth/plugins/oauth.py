@@ -1,5 +1,5 @@
-import hashlib
 from typing import Optional
+from urllib.parse import urlencode
 
 import httpx
 from fastapi import Response
@@ -45,16 +45,15 @@ class OAuthPlugin:
 
         meta = PROVIDERS[provider]
         config = self._configs[provider]
-        scopes = "%20".join(meta["scopes"])
 
-        return (
-            f"{meta['auth_url']}"
-            f"?client_id={config.client_id}"
-            f"&redirect_uri={config.redirect_uri}"
-            f"&response_type=code"
-            f"&scope={scopes}"
-            f"&state={state}"
-        )
+        params = {
+            "client_id": config.client_id,
+            "redirect_uri": config.redirect_uri,
+            "response_type": "code",
+            "scope": " ".join(meta["scopes"]),
+            "state": state,
+        }
+        return f"{meta['auth_url']}?{urlencode(params)}"
 
     async def _exchange_code(self, provider: str, code: str) -> dict:
         meta = PROVIDERS[provider]
@@ -105,21 +104,20 @@ class OAuthPlugin:
                     return entry["email"]
             return None
 
-    def _hash_token(self, token: str) -> str:
-        """Hash SHA-256 d'un token OAuth pour le stockage en base."""
-        return hashlib.sha256(token.encode()).hexdigest()
-
     def _extract_user_data(self, provider: str, userinfo: dict) -> dict:
         if provider == "google":
             return {
                 "provider_user_id": userinfo["sub"],
-                "email": userinfo["email"],
+                "email": userinfo.get("email"),
+                # Google renvoie email_verified (bool ou "true"/"false")
+                "email_verified": str(userinfo.get("email_verified")).lower() == "true",
             }
         if provider == "github":
             return {
                 "provider_user_id": str(userinfo["id"]),
-                # email peut etre None si prive -- traite dans handle_callback
+                # email public peut etre None -- resolu via /user/emails (deja verifie)
                 "email": userinfo.get("email"),
+                "email_verified": bool(userinfo.get("email")),
             }
         raise ValueError(f"Provider inconnu : {provider}")
 
@@ -127,39 +125,54 @@ class OAuthPlugin:
         # 1. Echange du code contre un token
         token_data = await self._exchange_code(provider, code)
         access_token = token_data["access_token"]
-        refresh_token = token_data.get("refresh_token")
 
         # 2. Recuperation des infos utilisateur
         userinfo = await self._get_userinfo(provider, access_token)
         user_data = self._extract_user_data(provider, userinfo)
 
-        # 2b. GitHub : email public peut etre None -> appel /user/emails
+        # 2b. GitHub : email public peut etre None -> appel /user/emails (emails verifies)
         if provider == "github" and not user_data["email"]:
             user_data["email"] = await self._get_github_primary_email(access_token)
+            user_data["email_verified"] = bool(user_data["email"])
         if not user_data["email"]:
             raise ValueError(
-                "Impossible de recuperer un email verifie depuis ce compte GitHub. "
+                "Impossible de recuperer un email verifie depuis ce compte. "
                 "Rends ton email public ou ajoute un email verifie."
             )
 
-        # 3. Recherche du compte OAuth existant
+        # 3. Recherche du compte OAuth existant (lien direct par provider_user_id)
         oauth_account = await self._db.get_oauth_account(provider, user_data["provider_user_id"])
 
         if oauth_account:
             user = await self._db.get_user_by_id(oauth_account.user_id)
         else:
-            user = await self._db.get_user_by_email(user_data["email"])
+            # Liaison a un compte existant par email UNIQUEMENT si l'email est verifie
+            # cote provider -- sinon risque d'account takeover.
+            user = None
+            if user_data["email_verified"]:
+                user = await self._db.get_user_by_email(user_data["email"])
             if not user:
+                if not user_data["email_verified"]:
+                    raise ValueError(
+                        "Email non verifie aupres du fournisseur OAuth. "
+                        "Verifie ton email avant de te connecter."
+                    )
                 user = await self._db.create_user(email=user_data["email"])
+                # Un compte cree via OAuth avec email verifie l'est aussi chez nous
+                await self._db.update_user(user.id, is_verified=True)
 
-            # Tokens hashes SHA-256 avant stockage -- jamais en clair en base
+            # On ne stocke PAS les tokens du provider : hashes ils sont inutilisables,
+            # en clair c'est une fuite. Le provider_user_id suffit a lier le compte.
             await self._db.create_oauth_account(
                 user_id=user.id,
                 provider=provider,
                 provider_user_id=user_data["provider_user_id"],
-                access_token=self._hash_token(access_token),
-                refresh_token=self._hash_token(refresh_token) if refresh_token else None,
+                access_token="",
+                refresh_token=None,
             )
+
+        if not user or not user.is_active:
+            raise ValueError("Compte desactive")
 
         # 4. Creation session ironauth
         self._session.set_tokens(response, user.id)

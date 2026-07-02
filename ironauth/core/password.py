@@ -1,23 +1,33 @@
 import secrets
 import string
 
-from passlib.context import CryptContext
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
 
-pwd_context = CryptContext(
-    schemes=["argon2"],
-    deprecated="auto",
-    argon2__memory_cost=65536,  # 64MB
-    argon2__time_cost=3,
-    argon2__parallelism=4,
+# Argon2id — mêmes paramètres que l'ancienne config passlib
+_ph = PasswordHasher(
+    memory_cost=65536,  # 64 MB
+    time_cost=3,
+    parallelism=4,
 )
 
 
 class PasswordManager:
     def hash(self, password: str) -> str:
-        return pwd_context.hash(password)
+        return _ph.hash(password)
 
     def verify(self, plain: str, hashed: str) -> bool:
-        return pwd_context.verify(plain, hashed)
+        try:
+            return _ph.verify(hashed, plain)
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            return False
+
+    def needs_rehash(self, hashed: str) -> bool:
+        """True si le hash a été produit avec des paramètres obsolètes."""
+        try:
+            return _ph.check_needs_rehash(hashed)
+        except InvalidHashError:
+            return True
 
     def validate_strength(self, password: str) -> None:
         errors = []

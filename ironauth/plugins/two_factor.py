@@ -40,11 +40,16 @@ class TwoFactorPlugin:
 
     async def enable_2fa(self, user_id: str) -> dict:
         """Étape 1 : génère le secret et le QR code, stocke le secret (non activé)."""
-        secret = self.generate_secret()
         user = await self._db.get_user_by_id(user_id)
         if not user:
             raise ValueError("Utilisateur introuvable")
 
+        # Refuse d'écraser un 2FA déjà actif : sinon on le désactive sans code.
+        # Pour reconfigurer, il faut d'abord appeler /2fa/disable avec un code valide.
+        if user.totp_enabled:
+            raise ValueError("2FA déjà activé — désactive-le d'abord pour le reconfigurer")
+
+        secret = self.generate_secret()
         # Stocke le secret en attente de confirmation
         await self._db.update_user(user_id, totp_secret=secret, totp_enabled=False)
 

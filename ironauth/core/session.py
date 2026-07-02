@@ -42,22 +42,47 @@ class SessionManager:
             {"sub": user_id, "type": "refresh"}, self.token.refresh_token_expiry
         )
 
-    def decode_token(self, token: str, token_type: str) -> Optional[str]:
+    def create_2fa_token(self, user_id: str) -> str:
+        """Token intermédiaire court (5 min) émis après le mot de passe,
+        avant la validation du code TOTP. Ne donne accès à rien d'autre."""
+        return self._create_token({"sub": user_id, "type": "2fa"}, 300)
+
+    def _decode(self, token: str, token_type: str) -> Optional[dict]:
+        """Décode et valide le payload complet. Lève ValueError si expiré/invalide."""
         try:
             payload = jwt.decode(token, self.secret, algorithms=[self.algorithm])
-            if payload.get("type") != token_type:
-                return None
-            return payload.get("sub")
         except jwt.ExpiredSignatureError:
             raise ValueError("Token expiré")
         except jwt.InvalidTokenError:
             raise ValueError("Token invalide")
+        if payload.get("type") != token_type:
+            return None
+        return payload
 
-    async def decode_token_safe(self, token: str, token_type: str) -> Optional[str]:
-        """Vérifie le token ET la blacklist."""
+    def decode_token(self, token: str, token_type: str) -> Optional[str]:
+        payload = self._decode(token, token_type)
+        return payload.get("sub") if payload else None
+
+    def decode_token_full(self, token: str, token_type: str) -> Optional[dict]:
+        """Retourne le payload complet (sub, iat, exp...) ou None si type incorrect."""
+        return self._decode(token, token_type)
+
+    async def decode_token_safe(self, token: str, token_type: str) -> Optional[dict]:
+        """Vérifie le token ET la blacklist, retourne le payload complet."""
         if await self.blacklist.is_blacklisted(token):
             raise ValueError("Token révoqué")
-        return self.decode_token(token, token_type)
+        return self._decode(token, token_type)
+
+    @staticmethod
+    def is_session_valid(payload: dict, sessions_valid_from: Optional[float]) -> bool:
+        """False si le token a été émis avant une révocation de masse (reset mdp...)."""
+        if sessions_valid_from is None:
+            return True
+        iat = payload.get("iat")
+        if iat is None:
+            return False
+        # iat est un int epoch (PyJWT sérialise les datetime en timestamp)
+        return float(iat) >= sessions_valid_from
 
     async def revoke_token(self, token: str) -> None:
         """Ajoute un token à la blacklist jusqu'à son expiration."""
@@ -109,8 +134,15 @@ class SessionManager:
     # --- Refresh ---
 
     async def refresh_session(
-        self, request: Request, response: Response
+        self, request: Request, response: Response, validate=None
     ) -> Optional[str]:
+        """
+        Fait tourner la paire de tokens.
+
+        `validate` : callback async optionnel (user_id, payload) -> bool.
+        Permet à l'appelant de vérifier is_active et sessions_valid_from
+        avant d'émettre une nouvelle session. Retourne None si invalide.
+        """
         refresh_token = self.get_refresh_token(request)
         if not refresh_token:
             return None
@@ -119,8 +151,18 @@ class SessionManager:
         if await self.blacklist.is_blacklisted(refresh_token):
             return None
 
-        user_id = self.decode_token(refresh_token, "refresh")
+        try:
+            payload = self._decode(refresh_token, "refresh")
+        except ValueError:
+            return None  # Token expiré ou invalide → 401 côté route, pas 500
+        if not payload:
+            return None
+
+        user_id = payload.get("sub")
         if not user_id:
+            return None
+
+        if validate is not None and not await validate(user_id, payload):
             return None
 
         # Révoque l'ancien refresh token — rotation réelle

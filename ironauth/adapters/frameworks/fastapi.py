@@ -4,6 +4,7 @@ from typing import Callable, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr
+from sqlalchemy.exc import IntegrityError
 
 from ironauth.adapters.database.sqlalchemy import SQLAlchemyAdapter
 from ironauth.core.config import ironauthConfig
@@ -36,8 +37,12 @@ class ResetPasswordRequest(BaseModel):
     password: str
 
 
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+
 class TwoFactorValidateRequest(BaseModel):
-    user_id: str
+    two_factor_token: str
     code: str
 
 
@@ -64,6 +69,8 @@ class FastAPIAdapter:
         self.oauth_plugin = oauth_plugin
         self.two_factor_plugin = two_factor_plugin
         self.rate_limiter = rate_limiter
+        if self.rate_limiter is not None and config.trust_proxy:
+            self.rate_limiter.trust_proxy = True
         self.email_manager = email_manager
         self.csrf = CSRFProtection(config.secret_key.get_secret_value())
         self.router = APIRouter(prefix="/auth", tags=["auth"])
@@ -82,19 +89,23 @@ class FastAPIAdapter:
             await self.csrf.validate_request(request)
             if self.rate_limiter:
                 await self.rate_limiter.check(request, "register")
+            try:
+                self.password.validate_strength(body.password)
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e))
             existing = await self.db.get_user_by_email(body.email)
             if existing:
                 if self.rate_limiter:
                     await self.rate_limiter.record_failure(request, "register")
                 raise HTTPException(status_code=400, detail="Email deja utilise")
-            try:
-                self.password.validate_strength(body.password)
-            except ValueError as e:
-                raise HTTPException(status_code=422, detail=str(e))
             hashed = self.password.hash(body.password)
-            user = await self.db.create_user(email=body.email, hashed_password=hashed)
+            try:
+                user = await self.db.create_user(email=body.email, hashed_password=hashed)
+            except IntegrityError:
+                # Race : un autre register concurrent a inséré le même email
+                raise HTTPException(status_code=400, detail="Email deja utilise")
             self.session.set_tokens(response, user.id)
-            return {"message": "Compte cree"}
+            return {"message": "Compte cree", "user_id": user.id}
 
         @self.router.post("/login")
         async def login(body: LoginRequest, request: Request, response: Response):
@@ -110,8 +121,27 @@ class FastAPIAdapter:
                 if self.rate_limiter:
                     await self.rate_limiter.record_failure(request, "login")
                 raise HTTPException(status_code=401, detail="Identifiants invalides")
+            if not user.is_active:
+                raise HTTPException(status_code=401, detail="Compte desactive")
             if self.rate_limiter:
                 await self.rate_limiter.record_success(request, "login")
+
+            # Rehash transparent si les paramètres Argon2 ont évolué
+            if self.password.needs_rehash(user.hashed_password):
+                await self.db.update_user(
+                    user.id, hashed_password=self.password.hash(body.password)
+                )
+
+            # 2FA activé : on n'émet PAS la session complète. On renvoie un token
+            # intermédiaire court à échanger sur /2fa/validate avec le code TOTP.
+            if self.two_factor_plugin and user.totp_enabled:
+                two_factor_token = self.session.create_2fa_token(user.id)
+                return {
+                    "message": "2FA requis",
+                    "two_factor_required": True,
+                    "two_factor_token": two_factor_token,
+                }
+
             self.session.set_tokens(response, user.id)
             return {"message": "Connecte"}
 
@@ -126,7 +156,17 @@ class FastAPIAdapter:
 
         @self.router.post("/refresh")
         async def refresh(request: Request, response: Response):
-            user_id = await self.session.refresh_session(request, response)
+            await self.csrf.validate_request(request)
+
+            async def _validate(user_id: str, payload: dict) -> bool:
+                user = await self.db.get_user_by_id(user_id)
+                if not user or not user.is_active:
+                    return False
+                return self.session.is_session_valid(payload, user.sessions_valid_from)
+
+            user_id = await self.session.refresh_session(
+                request, response, validate=_validate
+            )
             if not user_id:
                 raise HTTPException(status_code=401, detail="Session expiree")
             return {"message": "Session renouvelee"}
@@ -174,10 +214,12 @@ class FastAPIAdapter:
                 except ValueError as e:
                     raise HTTPException(status_code=400, detail=str(e))
 
-            @self.router.get("/verify-email")
-            async def verify_email(token: str):
+            @self.router.post("/verify-email")
+            async def verify_email(body: VerifyEmailRequest):
+                # POST + token dans le body : évite la fuite du token via logs/referrer,
+                # et le prefetch de lien (GET) qui consommerait le token.
                 assert self.email_manager is not None
-                verified = await self.email_manager.verify_email(token)
+                verified = await self.email_manager.verify_email(body.token)
                 if not verified:
                     raise HTTPException(status_code=400, detail="Token invalide ou expire")
                 return {"message": "Email verifie"}
@@ -207,6 +249,7 @@ class FastAPIAdapter:
 
             @self.router.post("/2fa/enable")
             async def enable_2fa(request: Request, user: User = Depends(self.current_user())):
+                await self.csrf.validate_request(request)
                 assert self.two_factor_plugin is not None
                 try:
                     result = await self.two_factor_plugin.enable_2fa(user.id)
@@ -215,7 +258,8 @@ class FastAPIAdapter:
                 return result
 
             @self.router.post("/2fa/confirm")
-            async def confirm_2fa(body: TwoFactorCodeRequest, user: User = Depends(self.current_user())):
+            async def confirm_2fa(body: TwoFactorCodeRequest, request: Request, user: User = Depends(self.current_user())):
+                await self.csrf.validate_request(request)
                 assert self.two_factor_plugin is not None
                 try:
                     confirmed = await self.two_factor_plugin.confirm_2fa(user.id, body.code)
@@ -226,12 +270,23 @@ class FastAPIAdapter:
                 return {"message": "2FA active"}
 
             @self.router.post("/2fa/validate")
-            async def validate_2fa(body: TwoFactorValidateRequest, request: Request):
+            async def validate_2fa(
+                body: TwoFactorValidateRequest, request: Request, response: Response
+            ):
+                # L'utilisateur est identifié par le token 2FA émis au login,
+                # PAS par un user_id arbitraire dans le body (sinon oracle TOTP).
+                await self.csrf.validate_request(request)
                 assert self.two_factor_plugin is not None
                 if self.rate_limiter:
                     await self.rate_limiter.check(request, "2fa_validate")
                 try:
-                    valid = await self.two_factor_plugin.validate_2fa(body.user_id, body.code)
+                    user_id = self.session.decode_token(body.two_factor_token, "2fa")
+                except ValueError:
+                    raise HTTPException(status_code=401, detail="Token 2FA expire ou invalide")
+                if not user_id:
+                    raise HTTPException(status_code=401, detail="Token 2FA invalide")
+                try:
+                    valid = await self.two_factor_plugin.validate_2fa(user_id, body.code)
                 except ValueError as e:
                     raise HTTPException(status_code=400, detail=str(e))
                 if not valid:
@@ -240,10 +295,13 @@ class FastAPIAdapter:
                     raise HTTPException(status_code=401, detail="Code 2FA invalide")
                 if self.rate_limiter:
                     await self.rate_limiter.record_success(request, "2fa_validate")
-                return {"message": "2FA valide"}
+                # Code correct → on émet enfin la vraie session
+                self.session.set_tokens(response, user_id)
+                return {"message": "Connecte"}
 
             @self.router.post("/2fa/disable")
-            async def disable_2fa(body: TwoFactorCodeRequest, user: User = Depends(self.current_user())):
+            async def disable_2fa(body: TwoFactorCodeRequest, request: Request, user: User = Depends(self.current_user())):
+                await self.csrf.validate_request(request)
                 assert self.two_factor_plugin is not None
                 try:
                     disabled = await self.two_factor_plugin.disable_2fa(user.id, body.code)
@@ -261,15 +319,18 @@ class FastAPIAdapter:
                     raise HTTPException(status_code=401, detail="Non authentifie")
                 return None
             try:
-                user_id = await self.session.decode_token_safe(token, "access")
-                if not user_id:
+                payload = await self.session.decode_token_safe(token, "access")
+                if not payload or not payload.get("sub"):
                     raise HTTPException(status_code=401, detail="Token invalide")
             except ValueError as e:
                 raise HTTPException(status_code=401, detail=str(e))
 
-            user = await self.db.get_user_by_id(user_id)
+            user = await self.db.get_user_by_id(payload["sub"])
             if not user or not user.is_active:
                 raise HTTPException(status_code=401, detail="Utilisateur introuvable")
+            # Token émis avant une révocation de masse (reset mdp) → invalide
+            if not self.session.is_session_valid(payload, user.sessions_valid_from):
+                raise HTTPException(status_code=401, detail="Session revoquee")
             return user
 
         return _get_current_user

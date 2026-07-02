@@ -1,9 +1,18 @@
+import hashlib
 import secrets
 import time
 
 from ironauth.adapters.database.sqlalchemy import SQLAlchemyAdapter
 from ironauth.plugins.email.base import EmailMessage, EmailProvider
 from ironauth.plugins.email.templates import reset_password_email, verification_email
+
+VERIFICATION_TOKEN_TTL = 86400  # 24 heures
+RESET_TOKEN_TTL = 3600  # 1 heure
+
+
+def _hash_token(token: str) -> str:
+    """Hash SHA-256 d'un token. Suffisant car le token brut a 256 bits d'entropie."""
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 class EmailManager:
@@ -33,7 +42,11 @@ class EmailManager:
             raise ValueError("Email déjà vérifié")
 
         token = secrets.token_urlsafe(32)
-        await self._db.update_user(user_id, email_verification_token=token)
+        await self._db.update_user(
+            user_id,
+            email_verification_token=_hash_token(token),
+            email_verification_expires_at=time.time() + VERIFICATION_TOKEN_TTL,
+        )
 
         verification_url = f"{self._base_url}/auth/verify-email?token={token}"
         html = verification_email(user.email, verification_url, self._app_name)
@@ -47,14 +60,21 @@ class EmailManager:
         ))
 
     async def verify_email(self, token: str) -> bool:
-        user = await self._db.get_user_by_verification_token(token)
+        user = await self._db.get_user_by_verification_token(_hash_token(token))
         if not user:
+            return False
+
+        # Vérifie l'expiration du token
+        if not user.email_verification_expires_at:
+            return False
+        if time.time() > user.email_verification_expires_at:
             return False
 
         await self._db.update_user(
             user.id,
             is_verified=True,
             email_verification_token=None,
+            email_verification_expires_at=None,
         )
         return True
 
@@ -67,11 +87,11 @@ class EmailManager:
             return
 
         token = secrets.token_urlsafe(32)
-        expires_at = time.time() + 3600  # 1 heure
+        expires_at = time.time() + RESET_TOKEN_TTL
 
         await self._db.update_user(
             user.id,
-            password_reset_token=token,
+            password_reset_token=_hash_token(token),
             password_reset_expires_at=expires_at,
         )
 
@@ -87,7 +107,7 @@ class EmailManager:
         ))
 
     async def reset_password(self, token: str, new_password: str, password_manager) -> bool:
-        user = await self._db.get_user_by_reset_token(token)
+        user = await self._db.get_user_by_reset_token(_hash_token(token))
         if not user:
             return False
 
@@ -105,5 +125,7 @@ class EmailManager:
             hashed_password=hashed,
             password_reset_token=None,
             password_reset_expires_at=None,
+            # Invalide toutes les sessions émises avant le reset
+            sessions_valid_from=time.time(),
         )
         return True

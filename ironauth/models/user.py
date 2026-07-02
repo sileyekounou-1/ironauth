@@ -29,9 +29,13 @@ class User(Base):
     )
     totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
     totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    email_verification_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    password_reset_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Tokens stockés hashés (SHA-256 hex = 64 car.), jamais en clair
+    email_verification_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    email_verification_expires_at: Mapped[float | None] = mapped_column(nullable=True)
+    password_reset_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     password_reset_expires_at: Mapped[float | None] = mapped_column(nullable=True)
+    # Tout token JWT émis avant cet instant (epoch) est invalide — révocation de masse
+    sessions_valid_from: Mapped[float | None] = mapped_column(nullable=True)
 
 
 class OAuthAccount(Base):

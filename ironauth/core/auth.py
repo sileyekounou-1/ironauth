@@ -18,9 +18,10 @@ class ironauth:
         self,
         database: SQLAlchemyAdapter,
         config: dict,
-        plugins: list = [],
+        plugins: list | None = None,
         adapter: dict | None = None,
     ):
+        plugins = plugins if plugins is not None else []
         # 1. Validation config
         self._config = ironauthConfig(**config)
 

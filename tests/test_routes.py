@@ -14,7 +14,11 @@ DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 @pytest.fixture
 def client():
     db = SQLAlchemyAdapter(DATABASE_URL)
-    asyncio.get_event_loop().run_until_complete(db.init())
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(db.init())
+    finally:
+        loop.close()
 
     auth = ironauth(
         database=db,
@@ -118,7 +122,12 @@ def test_refresh(client):
         headers=headers,
     )
     refresh_token = login_res.cookies.get("af_refresh_token")
-    res = client.post("/auth/refresh", cookies={"af_refresh_token": refresh_token})
+    headers = get_csrf_headers(client)  # /refresh exige désormais un token CSRF
+    res = client.post(
+        "/auth/refresh",
+        cookies={"af_refresh_token": refresh_token},
+        headers=headers,
+    )
     assert res.status_code == 200
 
 

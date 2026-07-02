@@ -1,12 +1,12 @@
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
 
 class CookieConfig(BaseModel):
     http_only: bool = True
     secure: bool = True
-    same_site: str = "lax"
+    same_site: Literal["lax", "strict", "none"] = "lax"
     access_token_name: str = "af_access_token"
     refresh_token_name: str = "af_refresh_token"
 
@@ -42,3 +42,15 @@ class ironauthConfig(BaseModel):
     token: TokenConfig = Field(default_factory=TokenConfig)
     oauth: Optional[OAuthConfig] = None
     email: Optional[EmailConfig] = None
+    # Derrière un reverse proxy fiable : lire l'IP client depuis X-Forwarded-For
+    trust_proxy: bool = False
+
+    @field_validator("secret_key")
+    @classmethod
+    def _secret_key_min_length(cls, v: SecretStr) -> SecretStr:
+        if len(v.get_secret_value()) < 32:
+            raise ValueError(
+                "secret_key doit faire au moins 32 caractères "
+                "(un secret HMAC court est vulnérable au brute-force)"
+            )
+        return v

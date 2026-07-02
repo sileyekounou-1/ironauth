@@ -62,15 +62,26 @@ class RateLimiter:
         window: int = 300,  # 5 minutes
         block_duration: int = 900,  # 15 minutes
         redis_url: Optional[str] = None,
+        trust_proxy: bool = False,
     ):
         self.max_attempts = max_attempts
         self.window = window
         self.block_duration = block_duration
+        # Positionné par l'adaptateur depuis la config si non fourni explicitement
+        self.trust_proxy = trust_proxy
         self._store = RedisStore(redis_url) if redis_url else InMemoryStore()
 
+    def _client_ip(self, request: Request) -> str:
+        if self.trust_proxy:
+            # Premier IP de la chaîne X-Forwarded-For = client d'origine.
+            # N'activer que derrière un proxy fiable, sinon l'en-tête est spoofable.
+            fwd = request.headers.get("x-forwarded-for")
+            if fwd:
+                return fwd.split(",")[0].strip()
+        return request.client.host if request.client else "unknown"
+
     def _get_key(self, request: Request, route: str) -> str:
-        ip = request.client.host if request.client else "unknown"
-        return f"ironauth:ratelimit:{route}:{ip}"
+        return f"ironauth:ratelimit:{route}:{self._client_ip(request)}"
 
     async def _get_attempts(self, key: str) -> int:
         if isinstance(self._store, InMemoryStore):
